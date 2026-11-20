@@ -213,6 +213,10 @@ fn group(n: u64) -> String {
 const MIB: u64 = 1024 * 1024;
 const GIB: u64 = 1024 * MIB;
 const LARGE_DISK_WARN: u64 = 512 * GIB;
+/// Disks that report fixed (non-removable) media and are larger than this are treated as
+/// external HDDs/SSDs and refused unless started with --allow-large-fixed.
+const FIXED_MEDIA_LIMIT: u64 = 256 * GIB;
+static mut ALLOW_LARGE_FIXED: bool = false;
 
 // ===================================================================== handles and buffers
 struct Handle(HANDLE);
@@ -325,6 +329,10 @@ impl DiskInfo {
     }
     fn style_str(&self) -> &'static str {
         match self.style { Some(0) => "MBR", Some(1) => "GPT", Some(2) => "RAW", _ => "?" }
+    }
+    fn is_removable(&self) -> bool { self.removable_media || self.media_type == 11 }
+    fn blocked_as_fixed(&self) -> bool {
+        !self.is_removable() && self.size > FIXED_MEDIA_LIMIT && !unsafe { ALLOW_LARGE_FIXED }
     }
     fn sector_size(&self) -> u64 {
         let s = self.sector as u64;
@@ -458,6 +466,11 @@ fn file_exists(p: &str) -> bool {
 /// Re-reads the disk and refuses anything that is not plainly a removable USB/SD/MMC disk.
 fn assert_safe(n: u32) -> Result<DiskInfo, String> {
     let d = get_disk(n).ok_or(format!("Disk {} not found.", n))?;
+    if d.blocked_as_fixed() {
+        return Err(format!(
+            "Disk {} ({}, {}) reports fixed media and is larger than 256 GiB: this looks like an external HDD/SSD, not a card or thumb drive. Refusing. (Start with --allow-large-fixed to override.)",
+            n, d.name(), fmt_bytes(d.size)));
+    }
     if !allowed_bus(d.bus) {
         return Err(format!("Disk {} has bus type {}, not USB/SD/MMC. Refusing.", n, bus_name(d.bus)));
     }
@@ -511,6 +524,11 @@ fn show_disks() -> Vec<DiskInfo> {
         if name.len() > 30 { name.truncate(30); }
         println!("  {:>4}  {:<30} {:<4} {:>10}  {:<5} {:<9} {:<8} {}",
             d.num, name, bus_name(d.bus), size, d.style_str(), d.read_only, d.offline, d.letters_str());
+        if d.blocked_as_fixed() {
+            warn(&format!("      ^ disk {} reports fixed media and is over 256 GiB (external HDD/SSD?): DriveDoctor will refuse it.", d.num));
+        } else if !d.is_removable() {
+            info(&format!("      ^ disk {} reports fixed media (normal for some USB sticks; external drives also look like this).", d.num));
+        }
     }
     println!();
     disks
@@ -534,7 +552,13 @@ fn confirm_destructive(d: &DiskInfo, action: &str) -> bool {
     println!();
     bad(&format!("!!! {} ERASES EVERYTHING on this disk !!!", action));
     bad(&format!("Disk {}: {}  [{}]  {}  serial {}", d.num, d.name(), bus_name(d.bus), fmt_bytes(d.size), d.serial));
-    if !d.letters.is_empty() { bad(&format!("Mounted as: {}", d.letters_str())); }
+    for (l, _) in &d.letters {
+        match volume_info(*l) {
+            Some(v) => bad(&format!("Mounted as {}:  {}  '{}'  {} used of {}", l, v.fs, v.label,
+                fmt_bytes(v.total.saturating_sub(v.free)), fmt_bytes(v.total))),
+            None => bad(&format!("Mounted as {}:", l)),
+        }
+    }
     if d.size > LARGE_DISK_WARN {
         warn("This disk reports more than 512 GB. That is unusual for an SD card or thumb drive: it may be an");
         warn("external SSD/HDD, or a fake-capacity card (those often claim 1-2 TB). Double-check before continuing.");
@@ -606,7 +630,7 @@ fn reg_clear_write_protect() -> bool {
     unsafe { RegSetKeyValueW(HKEY_LOCAL_MACHINE, sub.as_ptr(), val.as_ptr(), REG_DWORD, &zero as *const u32 as *const c_void, 4) == 0 }
 }
 
-struct VolInfo { fs: String, label: String, free: u64 }
+struct VolInfo { fs: String, label: String, free: u64, total: u64 }
 
 fn volume_info(l: char) -> Option<VolInfo> {
     let root = wide(&format!(r"{}:\", l));
@@ -617,7 +641,7 @@ fn volume_info(l: char) -> Option<VolInfo> {
     if ok == 0 { return None; }
     let (mut avail, mut total, mut free) = (0u64, 0u64, 0u64);
     unsafe { GetDiskFreeSpaceExW(root.as_ptr(), &mut avail, &mut total, &mut free); }
-    Some(VolInfo { fs: from_wide(&fs), label: from_wide(&name), free })
+    Some(VolInfo { fs: from_wide(&fs), label: from_wide(&name), free, total })
 }
 
 // ===================================================================== raw test engine
@@ -1329,7 +1353,12 @@ fn main() {
         println!("DriveDoctor {} - removable drive diagnostics and repair", env!("CARGO_PKG_VERSION"));
         println!("  drivedoctor          interactive menu (asks for administrator rights)");
         println!("  drivedoctor --list   print removable drives and exit");
+        println!("  --allow-large-fixed  also accept fixed-media disks over 256 GiB (external HDD/SSD). Dangerous.");
         return;
+    }
+    if args.iter().any(|a| a == "--allow-large-fixed") {
+        unsafe { ALLOW_LARGE_FIXED = true; }
+        warn("--allow-large-fixed: external HDD/SSD-sized fixed disks will NOT be refused.");
     }
     if args.iter().any(|a| a == "--list") {
         if !is_elevated() { warn("Not running as administrator: sizes and layouts may be missing."); }

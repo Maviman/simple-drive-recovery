@@ -20,19 +20,25 @@
     Run from a normal PowerShell console (not the ISE). Press Esc to stop a running test.
 #>
 [CmdletBinding()]
-param()
+param(
+    # Also accept fixed-media disks over 256 GiB (external HDD/SSD). Dangerous.
+    [switch]$AllowLargeFixed
+)
 
 $ErrorActionPreference = 'Continue'
 $Version = '1.0'
 $AllowedBusTypes = @('USB', 'SD', 'MMC')
 $LargeDiskWarnBytes = 512GB
+$FixedMediaLimitBytes = 256GB
 
 # ---------------------------------------------------------------- elevation
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host 'DriveDoctor needs administrator rights for raw disk access. Relaunching elevated...' -ForegroundColor Yellow
     $exe = (Get-Process -Id $PID).Path
-    Start-Process -FilePath $exe -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-File', "`"$PSCommandPath`"")
+    $relArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-File', "`"$PSCommandPath`"")
+    if ($AllowLargeFixed) { $relArgs += '-AllowLargeFixed' }
+    Start-Process -FilePath $exe -Verb RunAs -ArgumentList $relArgs
     return
 }
 
@@ -470,10 +476,17 @@ function Get-CandidateDisks {
         Sort-Object Number)
 }
 
+function Test-LargeFixed($d) {
+    if ($AllowLargeFixed -or $d.Size -le $FixedMediaLimitBytes) { return $false }
+    $wmi = Get-CimInstance Win32_DiskDrive -Filter "Index=$($d.Number)" -ErrorAction SilentlyContinue
+    return -not ($wmi -and [string]$wmi.MediaType -match 'Removable')
+}
+
 function Assert-SafeDisk([int]$n) {
     $d = Get-Disk -Number $n -ErrorAction Stop
     if ($d.IsBoot -or $d.IsSystem) { throw "Disk $n is a boot/system disk. Refusing." }
     if ($AllowedBusTypes -notcontains [string]$d.BusType) { throw "Disk $n has bus type '$($d.BusType)', not USB/SD/MMC. Refusing." }
+    if (Test-LargeFixed $d) { throw "Disk $n ($($d.FriendlyName), $(Format-Bytes $d.Size)) reports fixed media and is larger than 256 GiB: this looks like an external HDD/SSD, not a card or thumb drive. Refusing. (Start with -AllowLargeFixed to override.)" }
     $letters = @(Get-DriveLetters $n)
     $sys = $env:SystemDrive.Substring(0, 1).ToUpper()
     if ($letters -contains $sys) { throw "Disk $n holds the Windows drive (${sys}:). Refusing." }
@@ -515,6 +528,9 @@ function Show-Disks {
         }
     }
     $rows | Format-Table -AutoSize | Out-Host
+    foreach ($d in $disks) {
+        if ($d.Size -gt 0 -and (Test-LargeFixed $d)) { Write-Warn "Disk $($d.Number) reports fixed media and is over 256 GiB (external HDD/SSD?): DriveDoctor will refuse it." }
+    }
     return $disks
 }
 
@@ -536,7 +552,11 @@ function Confirm-Destructive($d, [string]$action) {
     Write-Host "  !!! $action ERASES EVERYTHING on this disk !!!" -ForegroundColor Red
     Write-Host ('  Disk {0}: {1}  [{2}]  {3}  serial {4}' -f $d.Number, $d.FriendlyName, $d.BusType, (Format-Bytes $d.Size), $d.SerialNumber) -ForegroundColor Red
     $letters = @(Get-DriveLetters $d.Number)
-    if ($letters.Count) { Write-Host ('  Mounted as: ' + (($letters | ForEach-Object { "${_}:" }) -join ' ')) -ForegroundColor Red }
+    foreach ($L in $letters) {
+        $v = Get-Volume -DriveLetter $L -ErrorAction SilentlyContinue
+        if ($v) { Write-Host ('  Mounted as {0}:  {1}  ''{2}''  {3} used of {4}' -f $L, $v.FileSystem, $v.FileSystemLabel, (Format-Bytes ($v.Size - $v.SizeRemaining)), (Format-Bytes $v.Size)) -ForegroundColor Red }
+        else { Write-Host "  Mounted as ${L}:" -ForegroundColor Red }
+    }
     if ($d.Size -gt $LargeDiskWarnBytes) {
         Write-Warn 'This disk reports more than 512 GB. That is unusual for an SD card or thumb drive: it may be an'
         Write-Warn 'external SSD/HDD, or a fake-capacity card (those often claim 1-2 TB). Double-check before continuing.'

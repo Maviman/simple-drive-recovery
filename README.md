@@ -18,8 +18,8 @@ PowerShell version: double-click `powershell\DriveDoctor.cmd`. It also writes lo
 - Only disks with bus type **USB, SD or MMC** are listed or accepted.
 - Refuses boot/system disks, the disk holding the Windows drive, any page file, or the disk the script runs from.
 - Destructive actions need you to type `ERASE <disk number>`, and abort if the disk's name, serial or size changed since you picked it.
-- Warns when a "removable" disk reports more than 512 GB (external SSD/HDD, or a fake card).
-- Caveat: a USB-attached external HDD/SSD also has bus type USB. Check the name and size on the confirm screen.
+- Refuses disks that report *fixed* media and are larger than 256 GiB: that is what USB external HDDs/SSDs look like. Override with `--allow-large-fixed` (PowerShell: `-AllowLargeFixed`).
+- Warns when a disk reports more than 512 GB (fake cards often claim 1-2 TB), and the confirm screen shows how much data each mounted volume holds.
 
 ## Menu
 
