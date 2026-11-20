@@ -1,0 +1,15 @@
+[package]
+name = "drivedoctor"
+version = "1.0.0"
+edition = "2021"
+description = "Diagnostic and repair tool for SD cards and USB thumb drives (Windows)"
+
+# No external crates: all Windows APIs are declared by hand in src/main.rs.
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
